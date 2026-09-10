@@ -1,0 +1,80 @@
+#!/bin/sh
+# PoC
+while true
+do
+    echo
+    echo "===== MENU ====="
+    echo "1) Setup Environment"
+    echo "2) Merging defconfig"
+    echo "3) Make nconfig"
+    echo "4) Make Image.gz"
+    echo "5) Make modules"
+    echo "6) Make All"
+    echo "7) Exit"
+    echo "================"
+    printf "Choose an option (1-7): "
+
+    read choice
+
+    case "$choice" in
+        1)
+            printf "\n\nDownloading clang-r563880c to toolchains folder\n\n"
+            wget -O clang-r563880c.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/f8439f0628d799092dd07df440a6334cab28939c/clang-r563880c.tar.gz"
+            echo "Extracting toolchain\n"
+            mkdir -p toolchain
+            tar -xvf clang-r563880c.tar.gz -C toolchain
+            rm clang-r563880c.tar.gz
+            printf "\n\nAdd toolchain binary to PATH\n\n"
+            cd toolchain/bin || exit 1
+            export PATH=$(pwd):$PATH
+            cd ../../
+            mkdir -p out
+            ;;
+        2)
+            printf "\n\nMerging defconfig\n\n"
+            cd toolchain/bin || exit 1
+            export PATH=$(pwd):$PATH
+            cd ../../
+            KCONFIG_CONFIG=out/.config scripts/kconfig/merge_config.sh -m -r arch/arm64/configs/vendor/kona-perf_defconfig arch/arm64/configs/vendor/oplus.config
+            ;;
+        3)
+            printf "\n\nMake nconfig...\n\n"
+            cd toolchain/bin || exit 1
+            export PATH=$(pwd):$PATH
+            cd ../../
+            make -j $(nproc --all) ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 AS=llvm-as DTC_EXT=$(pwd)/dtc nconfig
+            ;;
+        4)
+            printf "\n\nMake Image.gz...\n\n"
+            cd toolchain/bin || exit 1
+            export PATH=$(pwd):$PATH
+            cd ../../
+            make -j $(nproc --all) ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 AS=llvm-as DTC_EXT=$(pwd)/dtc Image.gz
+            ;;
+        5)
+            printf "\n\nMake Modules...\n\n"
+            cd toolchain/bin || exit 1
+            export PATH=$(pwd):$PATH
+            cd ../../
+            make -j $(nproc --all) ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 AS=llvm-as DTC_EXT=$(pwd)/dtc modules
+            ;;
+        6)
+            printf "\n\nMake all...\n\n"
+            cd toolchain/bin || exit 1
+            export PATH=$(pwd):$PATH
+            cd ../../
+            make -j $(nproc --all) ARCH=arm64 O=out CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 AS=llvm-as DTC_EXT=$(pwd)/dtc all
+            ;;
+        7)
+            echo "Goodbye!"
+            exit 0
+            ;;
+        *)
+            echo "Invalid option."
+            ;;
+    esac
+
+    echo
+    printf "Press Enter to return to the menu..."
+    read dummy
+done
