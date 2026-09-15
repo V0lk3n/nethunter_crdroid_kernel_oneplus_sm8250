@@ -277,6 +277,46 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 	if (g_inj_tx_vdev.created) {
 		if (g_inj_tx_vdev.chanfreq == chanfreq)
 			return QDF_STATUS_SUCCESS;
+
+	/* Prepare and send VDEV_START command to switch frequency
+	 * and lock the synthesizer on the target channel.
+	 */
+	qdf_mem_zero(&vstart, sizeof(vstart));
+		vstart.vdev_id            = g_inj_tx_vdev.vdev_id;
+		vstart.channel.mhz        = chanfreq;
+		vstart.channel.cfreq1     = chanfreq;
+		vstart.channel.cfreq2     = 0;
+		vstart.channel.phy_mode   = (enum wlan_phymode)((chanfreq < 4000) ? WMI_HOST_MODE_11G : WMI_HOST_MODE_11A);
+		vstart.channel.maxregpower = 20;
+		vstart.channel.maxpower    = 20;
+		vstart.is_restart         = true;
+
+		status = wmi_unified_vdev_start_send(wma->wmi_handle, &vstart);
+		if (QDF_IS_STATUS_SUCCESS(status)) {
+
+			/* Force fixed rate, DTIM and RX filter for hopping stability */
+			struct vdev_set_params vp = {0};
+			vp.vdev_id = g_inj_tx_vdev.vdev_id;
+			vp.param_id = 0x64; /* WMI_VDEV_PARAM_RX_FILTER */
+			vp.param_value = 0xFFFFFFFF;
+
+			wmi_unified_vdev_set_param_send(wma->wmi_handle, &vp);
+
+			vp.param_id = WMI_VDEV_PARAM_FIXED_RATE;
+			vp.param_value = 0x1;
+
+			wmi_unified_vdev_set_param_send(wma->wmi_handle, &vp);
+
+			vp.param_id = WMI_VDEV_PARAM_DTIM_PERIOD;
+			vp.param_value = 1;
+
+			wmi_unified_vdev_set_param_send(wma->wmi_handle, &vp);
+
+			g_inj_tx_vdev.chanfreq = chanfreq;
+		qdf_sleep(15);
+			return QDF_STATUS_SUCCESS;
+		}
+
 		/* Channel changed – tear down and recreate */
 		wma_injection_destroy_tx_vdev(wma);
 	}
@@ -295,7 +335,8 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 		for (i = fw_max_vid; i >= 0; i--) {
 			if ((uint8_t)i == mon_vdev_id)
 				continue;
-			if (!wma->interfaces[i].vdev) {
+			if (!wma->interfaces[i].vdev &&
+			    !wma->interfaces[i].vdev_active) {
 				vid = (uint8_t)i;
 				found = true;
 				break;
@@ -310,8 +351,13 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 	/* New vdev being created — reset session state for a clean start */
 	wma_injection_reset_session_state();
 
-	mon_mac = wlan_vdev_mlme_get_macaddr(
-			wma->interfaces[mon_vdev_id].vdev);
+	if (!wma->interfaces[mon_vdev_id].vdev) {
+			wma_err("Injection: monitor vdev invalid");
+	        return QDF_STATUS_E_FAILURE;
+	}
+
+	mon_mac = wlan_vdev_mlme_get_macaddr(wma->interfaces[mon_vdev_id].vdev);
+
 	if (!mon_mac) {
 		wma_err("Injection: cannot read monitor vdev MAC");
 		return QDF_STATUS_E_FAILURE;
@@ -345,7 +391,8 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 	 * Without these sleeps the mgmt-TX arrives before VDEV_CREATE is
 	 * done and firmware asserts in wlan_vdev_find_vdev.
 	 */
-	msleep(150);
+
+	qdf_sleep(15);
 
 	/* ---------- 2. VDEV START (20 MHz basic mode) ---------- */
 	qdf_mem_zero(&vstart, sizeof(vstart));
@@ -353,19 +400,20 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 	vstart.channel.mhz        = chanfreq;
 	vstart.channel.cfreq1     = chanfreq;
 	vstart.channel.cfreq2     = 0;
-	/* 2.4 GHz → MODE_11G(1), 5 GHz → MODE_11A(0) */
-	vstart.channel.phy_mode   = (chanfreq < 4000) ? 1 : 0;
+	/* 2.4 GHz → WMI_HOST_MODE_11G, 5 GHz → WMI_HOST_MODE_11A */
+	vstart.channel.phy_mode   = (enum wlan_phymode)((chanfreq < 4000) ? WMI_HOST_MODE_11G : WMI_HOST_MODE_11A);
 	vstart.channel.maxregpower = 20;
 	vstart.channel.maxpower    = 20;
-	vstart.beacon_interval     = 0;
-	vstart.dtim_period         = 0;
+	vstart.beacon_interval    = 0;
+	vstart.dtim_period        = 0;
 
 	status = wmi_unified_vdev_start_send(wma->wmi_handle, &vstart);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		wma_err("Injection TX vdev start failed: %d", status);
 		goto err_stop;
 	}
-	msleep(150);
+
+	qdf_sleep(15);
 
 	/* ---------- 3. PEER CREATE (self-peer → fw vdev+0xc) ---------- */
 	qdf_mem_zero(&pcreate, sizeof(pcreate));
@@ -378,7 +426,8 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 		wma_err("Injection TX vdev peer create failed: %d", status);
 		goto err_stop;
 	}
-	msleep(100);
+
+	qdf_sleep(10);
 
 	/*
 	 * Skip VDEV_UP.  For STA vdevs, firmware's wlan_vdev_up
@@ -392,6 +441,7 @@ wma_injection_ensure_tx_vdev(tp_wma_handle wma,
 	g_inj_tx_vdev.monitor_vdev_id  = mon_vdev_id;
 	g_inj_tx_vdev.chanfreq         = chanfreq;
 	qdf_mem_copy(g_inj_tx_vdev.mac_addr, inj_mac, QDF_MAC_ADDR_SIZE);
+	wma->interfaces[vid].vdev_active = true;
 
 	wma_info("Injection TX helper vdev created: vdev_id=%u mac=%pM freq=%u type=STA",
 		 vid, inj_mac, chanfreq);
